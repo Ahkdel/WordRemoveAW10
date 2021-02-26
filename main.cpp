@@ -10,119 +10,61 @@ int main (int argc, char *argv[])
     gst_init (&argc, &argv);
     g_print("PID: %d\n", getpid());
     signal(SIGRTMIN+2, wakeup);
-    gchar *pathname = (char*) malloc(1), *length = (char*) malloc(3);
-    time_t start;
-    start = time(&start);
-    do {
-        GstBus *bus;
-        PipeStruct pipe;
-        first_voice = TRUE;
+    SMR_dB = atof(argv[1]);
+    g_print("SMR_dB: %f\n", SMR_dB);
+    GstBus *bus;
+    PipeStruct pipe;
+    //Element creations
+    newElements(&pipe);
 
-        //Element creations
-        if (newElements(&pipe) < 0)
-            return -1;
+    //Pipe construction
+    gst_bin_add_many(GST_BIN (pipe.pipeline), pipe.alsasrc, pipe.decodebin, pipe.audioresample,
+                     pipe.audioconvert0, pipe.level, pipe.queue, pipe.fakesink, pipe.flacenc0, NULL);
+    if (!setLinks(&pipe)) return -1;
+    pipe.filesink0 = NULL;
 
-        //Pipe construction
-        gst_bin_add_many(GST_BIN (pipe.pipeline), pipe.alsasrc, pipe.decodebin, pipe.audioresample,
-                         pipe.level, pipe.selector, pipe.audioconvert0, pipe.flacenc0, pipe.filesink0, pipe.fakesink, NULL);
+    //Properties of elements
+    setProperties(&pipe);
 
-        //Properties of elements
-        setProperties(&pipe);
+    //SignalS for decodebin
+    g_signal_connect(G_OBJECT(pipe.decodebin), "pad_added", G_CALLBACK (decoder_pad_handler), &pipe);
+    g_signal_connect(G_OBJECT(pipe.decodebin), "drained",   G_CALLBACK (drained_callback),    &pipe);
 
-        //Signal for decodebin
-        g_signal_connect (pipe.decodebin, "pad_added", G_CALLBACK (decoder_pad_handler), &pipe);
+    loop = g_main_loop_new(NULL, FALSE);
+    g_print("Initialized the loop\n");
 
-        if (setLinks(&pipe) < 0)
-            return -1;
+    bus = gst_element_get_bus (pipe.pipeline);
+    gst_bus_add_signal_watch(bus);
+    g_signal_connect(G_OBJECT(bus), "message", G_CALLBACK (message_cb), &pipe);
 
-        //Handling the selector. TODO: change to pads template (supposedly much faster)
-        if (selector_pad_handler(&pipe) < 0) {
-            gst_element_release_request_pad(pipe.selector, src0_pad);
-            gst_element_release_request_pad(pipe.selector, src1_pad);
-            g_print ("Error at linking output-selector to the rest of the elements. Executing...\n");
-            return -1;
-        }
-//        g_print ("output-selector pads: \n`-> scr0: %s\n`-> src1: %s\n\n",
-//                 gst_pad_get_name (src0_pad), gst_pad_get_name(src1_pad));
-        g_object_set (G_OBJECT (pipe.selector), "active_pad", src1_pad, NULL);
-
-        loop = g_main_loop_new(NULL, FALSE);
-        g_print("Initialized the loop\n");
-
-        bus = gst_element_get_bus (pipe.pipeline);
-        gst_bus_add_signal_watch(bus);
-        g_signal_connect(G_OBJECT (bus), "message", G_CALLBACK (message_cb), &pipe);
-
-        time_reserve = 0;
-        first_voice = TRUE;
-        time_t now;
-        g_print("Calling pause() and occured %f since beginning of program\n", difftime(time(&now), start));
-        do pause();
-        while (awake == FALSE);
-        awake = TRUE;
-
-        FILE *file = fopen("/home/root/WordRemove/status", "r");
-        length = (char*) realloc(length,3);
-        fscanf(file, "%s", length);
-        pathname = (char*) realloc(pathname,atoi(length)+1);
-        fscanf(file, "%s", pathname);
-        g_object_set (G_OBJECT (pipe.filesink0), "location", pathname, NULL);
-        g_print("Pathname: '%s'\n", pathname);
-        //free(pathname);
-        //free(length);
-        fclose(file);
-
-        GstStateChangeReturn returnstate = gst_element_set_state(pipe.pipeline, GST_STATE_PLAYING);
-
-        if (returnstate == GST_STATE_CHANGE_FAILURE) {
-            g_printerr ("Unable to set pipeline to PLAYING. Executing.\n");
-            gst_object_unref (pipe.pipeline);
-            return -1;
-        }
-
-        g_print("Running the loop\n");
-        g_main_loop_run(loop);
-
-        writeDoneFile();
-
-        //Free resources
-        gst_bus_remove_signal_watch(bus);
-        gst_object_unref(bus);
-        g_main_loop_unref (loop);
-
-        gst_element_release_request_pad(pipe.selector, src0_pad);
-        gst_element_release_request_pad(pipe.selector, src1_pad);
-        gst_element_set_state (pipe.pipeline, GST_STATE_NULL);
+    GstStateChangeReturn returnstate = gst_element_set_state(pipe.pipeline, GST_STATE_PLAYING);
+    g_print("returnstate in main = %d\n", returnstate);
+    if (returnstate == GST_STATE_CHANGE_FAILURE) {
+        g_printerr ("(Before loop): Unable to set pipeline to PAUSED. Executing.\n");
         gst_object_unref (pipe.pipeline);
-    } while(TRUE);
-    return 0;
-}
+        return -1;
+    }
+    g_timeout_add(300, GSourceFunc(timeout_sleep_cb), &pipe);
+    g_print("Running the loop\n");
+    g_main_loop_run(loop);
 
-static gint
-check_links (GstElement *element, gchar *pad) {
-    GstPad *check_pad = gst_element_get_static_pad(element, pad);
-    if (!check_pad){
-        g_error("Couldn't retrieve the pad of %s\n", gst_pad_get_name(check_pad));
-        g_object_unref(check_pad);
-        return -1;
-    }
-    if (!gst_pad_is_linked(check_pad)){
-        g_error("Pad (%s) is not linked\n", gst_pad_get_name(check_pad));
-        g_object_unref(check_pad);
-        return -1;
-    }
-    g_object_unref(check_pad);
+    //Free resources
+    gst_bus_remove_signal_watch(bus);
+    gst_object_unref(bus);
+    g_main_loop_unref (loop);
+
+    gst_element_set_state (pipe.pipeline, GST_STATE_NULL);
+    gst_object_unref (pipe.pipeline);
     return 0;
 }
 
 static void
 message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
-    gboolean terminating = FALSE;
     msg = gst_bus_timed_pop_filtered (bus, GST_CLOCK_TIME_NONE,
-                                      (GstMessageType)(GST_MESSAGE_STATE_CHANGED | GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_ELEMENT));
+                                     (GstMessageType)(GST_MESSAGE_STATE_CHANGED | GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_ELEMENT | GST_MESSAGE_STREAM_STATUS));
     // Parse message
     if (msg != NULL) {
-
+        //g_print("-> Message got: %d\n", GST_MESSAGE_TYPE(msg));
         switch (GST_MESSAGE_TYPE (msg))
         {
         case GST_MESSAGE_ERROR:
@@ -137,7 +79,8 @@ message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
             break;
 
         case GST_MESSAGE_EOS:
-            g_print ("End-Of-Stream reached.\n");
+            if (GST_MESSAGE_SRC (msg) == GST_OBJECT (pipe->filesink0))
+                g_print ("End-Of-Stream reached.\n");
             g_main_loop_quit(loop);
             break;
 
@@ -146,30 +89,34 @@ message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
             if (GST_MESSAGE_SRC (msg) == GST_OBJECT (pipe->pipeline)) {
                 GstState old_state, new_state, pending_state;
                 gst_message_parse_state_changed (msg, &old_state, &new_state, &pending_state);
-                g_print ("Pipeline state changed from %s to %s:\n",
-                         gst_element_state_get_name (old_state), gst_element_state_get_name (new_state));
-//                gchar sink[] = "sink";
-//                gchar src[] = "src";
-//                if (check_links(pipe->alsasrc, src) < 0) g_main_loop_quit(loop);
-//                if (check_links(pipe->decodebin, sink) < 0) g_main_loop_quit(loop);
-//                if (check_links(pipe->fakesink, sink) < 0) g_main_loop_quit(loop);
-//                if (check_links(pipe->audioconvert0, sink) < 0) g_main_loop_quit(loop);
+                const gchar *stateOld = gst_element_state_get_name (old_state);
+                const gchar *stateNew = gst_element_state_get_name (new_state);
+                g_print("Pipeline state changed from %s to %s:\n", stateOld, stateNew);
             }
             break;
 
         case GST_MESSAGE_ELEMENT:
-            if ((pipe->pipeline->current_state == GST_STATE_PLAYING) && (terminating == FALSE)) {
-                message_handler(msg, pipe->selector);
+            if ((recording) && (pipe->pipeline->current_state == GST_STATE_PLAYING)) {
+                message_handler(msg, pipe);
                 if (time_reserve > GUARDING_TIME) {
-//                    g_print("\n\t|**************************************************|\n");
-//                    g_print("\t|             Exceeded the silent time.            |\n");
-//                    g_print("\t|        Now trying to terminate and unref.        |\n");
-//                    g_print("\t|**************************************************|\n");
-                    g_main_loop_quit(loop);
+                    g_print("time_reserve > GUARDING_TIME\n");
+                    GstPad *srcpad = gst_element_get_static_pad(pipe->queue, "src");
+                    gst_pad_add_probe(srcpad, GstPadProbeType(GST_PAD_PROBE_TYPE_BLOCK),
+                                      GstPadProbeCallback(sink_swap_cb), pipe, NULL);
+                    g_print("Writing donefile\n");
+                    writeDoneFile();
+                    time_reserve = 0;
+                    first_voice = TRUE;
+                    awake = FALSE;
+                    recording = FALSE;
+                    g_print("Adding timeout_sleep_cb\n");
+                    g_timeout_add(300, GSourceFunc(timeout_sleep_cb), pipe);
                 }
             }
             break;
-
+        case GST_MESSAGE_STREAM_STATUS:
+            //g_print("GST_MESSAGE_STREAM_STATUS\n");
+            break;
         default:
             // We should not reach here
             g_printerr ("Unexpected message received.\n");
@@ -179,6 +126,7 @@ message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
         gst_message_unref (msg);
     }
 }
+
 
 
 

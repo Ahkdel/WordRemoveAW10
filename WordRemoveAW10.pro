@@ -23,3 +23,5 @@ PKGCONFIG += gstreamer-1.0 Qt5GLib-2.0 Qt5GStreamer-1.0 glib-2.0 gobject-2.0
 SOURCES += main.cpp
 
 HEADERS += WordRemove.h \
+
+
