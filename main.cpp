@@ -12,8 +12,10 @@ int main (int argc, char *argv[])
     signal(SIGRTMIN+2, wakeup);
     SMR_dB = atof(argv[1]);
     g_print("SMR_dB: %f\n", SMR_dB);
+
     GstBus *bus;
     PipeStruct pipe;
+
     //Element creations
     newElements(&pipe);
 
@@ -96,6 +98,7 @@ message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
             break;
 
         case GST_MESSAGE_ELEMENT:
+            //g_print("\npipe->pipeline->current_state: %d", pipe->pipeline->current_state);
             if ((recording) && (pipe->pipeline->current_state == GST_STATE_PLAYING)) {
                 message_handler(msg, pipe);
                 if (time_reserve > GUARDING_TIME) {
@@ -107,8 +110,9 @@ message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
                     writeDoneFile();
                     time_reserve = 0;
                     first_voice = TRUE;
-                    awake = FALSE;
+                    counting = FALSE;
                     recording = FALSE;
+                    awake = FALSE;
                     g_print("Adding timeout_sleep_cb\n");
                     g_timeout_add(300, GSourceFunc(timeout_sleep_cb), pipe);
                 }
@@ -141,7 +145,8 @@ message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe) {
 
 
 
-/*static void
+/*
+static void
 info(char *dev_name, snd_pcm_stream_t stream) {
     snd_pcm_hw_params_t *hw_params;
     int err;

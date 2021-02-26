@@ -5,20 +5,23 @@
 #include <time.h>
 
 #define GLIB_DISABLE_DEPRECATION_WARNINGS
+#define GUARDING_TIME   0.6 * 1000000000
 
 #include <gst/gst.h>
 
-#define FILESINK_LOC   "/home/root/WordRemove/"
-#define GUARDING_TIME   0.6 * 1000000000
-
-gboolean counting = FALSE, first_voice = TRUE;
-GstClockTime flag_time, time_reserve = 0;
-gfloat SMR_dB;
-gboolean awake = FALSE;
-gchar *pathname = (char*) malloc(1);
+//Leveling flags
+gboolean counting = FALSE;
+gboolean first_voice = TRUE;
 gboolean recording = FALSE;
+gfloat SMR_dB;
+GstClockTime flag_time;
+GstClockTime time_reserve = 0;
 
+gchar *pathname = (char*) malloc(1);
 gint event_id;
+gboolean EOS_flag = FALSE;
+gboolean awake = FALSE;
+
 GMainLoop *loop;
 
 // Pipe structure defined here
@@ -31,10 +34,28 @@ typedef struct _PipeStruct
     *fakesink;
 } PipeStruct;
 
-PipeStruct WRpipe;
+static void newElements (PipeStruct *);
+static gboolean setLinks (PipeStruct *);
+static void setProperties(PipeStruct *);
+static void setLocationFilesink (GstElement *);
+static void create_filesink (PipeStruct *);
+static void decoder_pad_handler (GstElement *, GstPad *, PipeStruct *);
+static void drained_callback (GstElement *, PipeStruct *);
+static void level_handling (gdouble, GstClockTime, PipeStruct *);
+static void message_handler (GstMessage *, PipeStruct *);
+static gboolean check_links (GstElement *, const gchar *);
+static void writeDoneFile (void);
 
-static gboolean timeout_cb(gchar *pathname);
-static GstPadProbeReturn sink_swap_cb (GstPad *srcpad, GstPadProbeInfo *info, PipeStruct *pipe);
+static void wakeup (int);
+
+//CALLBACKS
+static gboolean timeout_cb(PipeStruct *);
+static gboolean timeout_sleep_cb (PipeStruct *);
+static GstPadProbeReturn eos_event_cb (GstPad *, GstPadProbeInfo *, PipeStruct *);
+static GstPadProbeReturn sink_swap_cb (GstPad *, GstPadProbeInfo *, PipeStruct *);
+static void message_cb (GstBus *, GstMessage *, PipeStruct *);
+
+
 
 static void
 newElements (PipeStruct *pipe)
@@ -78,15 +99,14 @@ setLinks (PipeStruct *pipe)
 }
 
 static void
-setProperties(PipeStruct *pipe)
+setProperties (PipeStruct *pipe)
 {
     g_object_set (G_OBJECT (pipe->alsasrc), "device", "dsnoop_micwm", NULL);
-    g_object_set (G_OBJECT (pipe->queue), "flush-on-eos", TRUE, NULL);
     g_object_set (G_OBJECT (pipe->fakesink), "async", FALSE, NULL);
     g_object_set (G_OBJECT (pipe->fakesink), "dump", FALSE, NULL);
     /*
     g_object_set (G_OBJECT (pipe->alsasrc), "blocksize", 8192, NULL);
-
+    g_object_set (G_OBJECT (pipe->queue), "flush-on-eos", TRUE, NULL);
     //g_object_set (G_OBJECT (pipe->decodebin), "max-size-buffers", 8192, NULL);
 
     //g_object_set (G_OBJECT (pipe->flacenc0), "blocksize", 4096, NULL);
@@ -97,7 +117,7 @@ setProperties(PipeStruct *pipe)
 }
 
 static void
-setLocationFilesink(GstElement *filesink)
+setLocationFilesink (GstElement *filesink)
 {
     g_print("Got into setLocationFilesink.\nOld pathname: '%s'\n", pathname);
     gchar *length = (char*) malloc(3);
@@ -112,7 +132,7 @@ setLocationFilesink(GstElement *filesink)
 }
 
 static void
-create_filesink(PipeStruct *pipe)
+create_filesink (PipeStruct *pipe)
 {
     pipe->filesink0 = gst_element_factory_make ("filesink", "sink0");
     g_assert (pipe->filesink0);
@@ -170,7 +190,7 @@ exit:
 }
 
 static void
-drained_callback(GstElement *decodebin, PipeStruct *pipe)
+drained_callback (GstElement *decodebin, PipeStruct *pipe)
 {
     g_print("...I'm in drained callback...\n");
     GstState state;
@@ -220,19 +240,16 @@ message_handler (GstMessage *message, PipeStruct *pipe)
     const GstStructure *message_structure = gst_message_get_structure(message);
     const gchar *name = gst_structure_get_name(message_structure);
 
-    message_structure = gst_message_get_structure (message);
-    name = gst_structure_get_name(message_structure);
-
-    //g_print ("\n*******DETECTED '%s' AS MESSAGE*******\n", name);
+    g_print ("\n*******DETECTED MESSAGE FROM THE ELEMENT '%s'*******\n", name);
 
     if (g_strcmp0 (name, "level") == 0)
     {
-        GstClockTime endtime;
-        const GValue *array_val;
-        const GValue *value;
         gdouble rms_dB/*, peak_dB, decay_dB*/;
         //gdouble rms;
+        const GValue *array_val;
+        const GValue *value;
         GValueArray *rms_arr/*, *peak_arr, *decay_arr*/;
+        GstClockTime endtime;
 
         //Parsing values for statistics
         if (!gst_structure_get_clock_time (message_structure, "endtime", &endtime))
@@ -241,14 +258,12 @@ message_handler (GstMessage *message, PipeStruct *pipe)
         array_val = gst_structure_get_value (message_structure, "rms");
         rms_arr = (GValueArray *) g_value_get_boxed (array_val);
 
-        /*array_val = gst_structure_get_value (message_structure, "peak");
+        /*
+        array_val = gst_structure_get_value (message_structure, "peak");
         peak_arr = (GValueArray *) g_value_get_boxed (array_val);
 
         array_val = gst_structure_get_value (message_structure, "decay");
         decay_arr = (GValueArray *) g_value_get_boxed (array_val);
-
-
-        g_print ("\n    endtime: %" GST_TIME_FORMAT "\n", GST_TIME_ARGS (endtime));
 
         value = g_value_array_get_nth (peak_arr, 0);
         peak_dB = g_value_get_double (value);
@@ -257,16 +272,17 @@ message_handler (GstMessage *message, PipeStruct *pipe)
         decay_dB = g_value_get_double (value);
         g_print ("      RMS: %f dB, peak: %f dB, decay: %f dB\n",
                  rms_dB, peak_dB, decay_dB);*/
+
         value = g_value_array_get_nth (rms_arr, 0);
         rms_dB = g_value_get_double (value);
-        g_print ("      RMS: %f dB\n", rms_dB);
+        g_print ("\tRMS: %f dB\n", rms_dB);
 
-        //converting from dB to normal gives us a value between 0.0 and 1.0
-
+        //Converting from dB to normal gives us a value between 0.0 and 1.0
         //rms = pow (10, rms_dB / 20);
-        //g_print ("      normalized rms value: %f\n", rms);
+        //g_print ("normalized rms value: %f\n", rms);
 
         level_handling (rms_dB, endtime, pipe);
+        g_print("endtime:   %" GST_TIME_FORMAT "\n", GST_TIME_ARGS (endtime));
         g_print("flag_time: %" GST_TIME_FORMAT "  ||  time_reserve: %" GST_TIME_FORMAT "\n",
                 GST_TIME_ARGS (flag_time), GST_TIME_ARGS (time_reserve));
     }
@@ -291,7 +307,7 @@ check_links (GstElement *element, const gchar *pad)
 }
 
 static void
-writeDoneFile(){
+writeDoneFile() {
     FILE *status = fopen("/home/root/WordRemove/donestatus", "w");
     fprintf(status, "done");
     fclose(status);
@@ -302,26 +318,30 @@ writeDoneFile(){
 //||--------------------------------------------------------||//
 
 static void
-wakeup(int signum) {
+wakeup(int signum)
+{
     if (signum == 36) {
-        g_print("I'm awake!\n");
+        g_print("\nI'm awake!\n");
         awake = TRUE;
     } else
         g_print("Received signal %d\n", signum);
 }
 
-static gboolean
-timeout_cb (gchar *pathname) {
-    g_print("[DISABLED] Timeout_cb (here we delete '%s' file)\n", pathname);
-    //remove(pathname);
-    time_reserve = GUARDING_TIME + 1;
-    return FALSE;
-}
-
-
 //||--------------------------------------------------------||//
 //||                       CALLBACKS                        ||//
 //||--------------------------------------------------------||//
+
+static gboolean
+timeout_cb (PipeStruct *pipe)
+{
+    g_print("\n[DISABLED] Timeout_cb (here we delete '%s' file)\n", pathname);
+    //remove(pathname);
+    time_reserve = GUARDING_TIME + 1;
+    gst_pad_add_probe(gst_element_get_static_pad(pipe->queue, "src"),
+                      GstPadProbeType(GST_PAD_PROBE_TYPE_BLOCK),
+                      GstPadProbeCallback(sink_swap_cb), pipe, NULL);
+    return FALSE;
+}
 
 static gboolean
 timeout_sleep_cb (PipeStruct *pipe)
@@ -329,7 +349,7 @@ timeout_sleep_cb (PipeStruct *pipe)
     if (awake == FALSE)
         return TRUE;
 
-    g_print("Timeout_sleep_cb\n");
+    g_print("\nTimeout_sleep_cb\n");
     if (!pipe->filesink0)
         create_filesink(pipe);
 
@@ -352,28 +372,24 @@ timeout_sleep_cb (PipeStruct *pipe)
     gst_element_get_state(pipe->flacenc0, &state, NULL, GST_CLOCK_TIME_NONE);
     g_print("Flacenc state: %d  [AFTER SET STATE]\n", state);
 
-    time_reserve = 0;
-    first_voice = TRUE;
-    event_id = g_timeout_add_seconds(5, GSourceFunc(timeout_cb), pathname);
     recording = TRUE;
+    event_id = g_timeout_add_seconds(5, GSourceFunc(timeout_cb), pipe);
     return FALSE;
 }
 
-gboolean flag = FALSE;
-
 static GstPadProbeReturn
-eos_event_cb (GstPad *srcpad, GstPadProbeInfo *info, PipeStruct *pipe)
+eos_event_cb (GstPad *sinkpad, GstPadProbeInfo *info, PipeStruct *pipe)
 {
     g_print("Got into eos_event_cb. Removing probe.\n");
-    gst_pad_remove_probe(srcpad, GST_PAD_PROBE_INFO_ID(info));
+    gst_pad_remove_probe(sinkpad, GST_PAD_PROBE_INFO_ID(info));
     GstStateChangeReturn returnstate = gst_element_set_state(pipe->filesink0, GST_STATE_NULL);
-    g_print("returnstate in eos_event_cb = %d\n", returnstate);
+    g_print("returnstate[filesink] in eos_event_cb = %d\n", returnstate);
     if (returnstate == GST_STATE_CHANGE_FAILURE) {
         g_printerr ("Unable to set pipeline to PLAYING. Executing.\n");
         gst_object_unref (pipe->pipeline);
         g_main_loop_quit(loop);
     }
-    flag = TRUE;
+    EOS_flag = TRUE;
     return GST_PAD_PROBE_DROP;
 }
 
@@ -398,6 +414,7 @@ sink_swap_cb (GstPad *srcpad, GstPadProbeInfo *info, PipeStruct *pipe)
             return GST_PAD_PROBE_REMOVE;
         }
         g_print("4-> Successfully linked queue and flacenc\n");
+
         gst_element_sync_state_with_parent(pipe->flacenc0);
         g_print("5-> Synced flacenc's state with its parent\n");
         gst_element_sync_state_with_parent(pipe->filesink0); //Maybe it's not necessary to do this
@@ -405,154 +422,38 @@ sink_swap_cb (GstPad *srcpad, GstPadProbeInfo *info, PipeStruct *pipe)
     }
 
     else {
+        EOS_flag = FALSE;
         g_print("1-> Checked fakesink pads and they are NOT linked\n");
-        flag = FALSE;
         gst_element_unlink(pipe->queue, pipe->flacenc0);
         g_print("2-> Successfully unlinked queue with flacenc\n");
+
         gst_pad_add_probe(gst_element_get_static_pad(pipe->filesink0, "sink"),
                           GstPadProbeType(GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM),
                           GstPadProbeCallback(eos_event_cb), pipe, NULL);
         gst_pad_send_event(gst_element_get_static_pad(pipe->flacenc0, "sink"), gst_event_new_eos());
-
-        while (!flag); //We wait until EOS is handled
+        while (!EOS_flag); //We wait until EOS is handled
         g_print("3-> Sent and handled the EOS event for filesink\n");
+
+        gst_element_unlink(pipe->flacenc0, pipe->filesink0);
+        gst_bin_remove(GST_BIN(pipe->pipeline), pipe->filesink0);
+        pipe->filesink0 = NULL;
+        g_print("4-> Unlinked flacenc and filesink, removed filesink from bin and set it to NULL\n");
+
         if (!gst_element_link(pipe->queue, pipe->fakesink)) {
             g_error("Unable to link queue and fakesink");
             gst_object_unref(srcpad);
             gst_object_unref(pipe->pipeline);
             return GST_PAD_PROBE_REMOVE;
         }
-        else g_print("4-> Successfully linked queue with fakesink\n");
+        else g_print("5-> Successfully linked queue with fakesink\n");
         gst_element_sync_state_with_parent(pipe->fakesink);
-        g_print("5-> Synced fakesink's state with its parent\n");
+        g_print("6-> Synced fakesink's state with its parent\n");
     }
     return GST_PAD_PROBE_DROP;
 }
 
-static void
-message_cb (GstBus *bus, GstMessage *msg, PipeStruct *pipe);
 
-//DEPRECATED
-static GstPadProbeReturn
-pad_probe_cb (GstPad *srcpad, GstPadProbeInfo *info, PipeStruct *pipe)
-{
-    //More reliable: https://gstreamer.freedesktop.org/documentation/application-development/advanced/pipeline-manipulation.html?gi-language=c#dynamically-changing-the-pipeline
-    //Do this instead: http://gstreamer-devel.966125.n4.nabble.com/Dynamically-updating-filesink-location-at-run-time-on-the-fly-td4660569.html
-    g_print("I just got into the probe callback\n");
-    /*
-    do {
-        g_print("I'm going to sleep ZzZzZzZz\n");
-        pause();
-        if (awake)
-            g_print("I woke up in the callback and awake is TRUE\n");
-        else
-            g_print("I woke up in the callback and awake is FALSE\n");
-    }while (awake == FALSE);
-    awake = FALSE;*/
-    gst_pad_remove_probe(srcpad, GST_PAD_PROBE_INFO_ID(info));
-    GstPad *sinkpad = gst_element_get_static_pad(pipe->audioconvert0, "sink");
-    flag = FALSE;
-    if (!gst_pad_unlink(srcpad, sinkpad))
-        g_error("Failed to unlink queue and filesink");
 
-    /*GstEvent *flush = gst_event_new_flush_start();
-    gst_pad_send_event(sinkpad, flush);
-    GstEvent *flush_stop = gst_event_new_flush_stop(FALSE);
-    gst_pad_send_event(sinkpad, flush_stop);*/
-
-    gst_pad_add_probe(gst_element_get_static_pad(pipe->filesink0, "sink"),
-                      GstPadProbeType(GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM),
-                      GstPadProbeCallback(eos_event_cb), pipe, NULL);
-    gst_pad_send_event(sinkpad, gst_event_new_eos());
-    while (!flag);
-    setLocationFilesink(pipe->filesink0);
-    g_object_unref(sinkpad);
-
-    gst_element_link(pipe->queue, pipe->audioconvert0);
-    //Maybe this is an overkill, but making sure to have a new clean filesink(?)
-    /*gst_element_set_state(pipe->filesink0, GST_STATE_NULL);
-    gst_bin_remove(GST_BIN(pipe->pipeline), pipe->filesink0);
-    gst_object_unref(G_OBJECT(pipe->filesink0));
-
-    pipe->filesink0 = gst_element_factory_make("filesink", NULL);
-    g_assert(pipe->filesink0);
-    g_print("Successfully created a new filesink\n");
-    gst_bin_add(GST_BIN(pipe->pipeline), pipe->filesink0);
-    gst_element_link(pipe->queue, pipe->filesink0);
-
-    gst_element_sync_state_with_parent(pipe->filesink0);*/
-
-    //    g_object_unref(sinkpad);
-    //    g_object_unref(srcpad2);
-    awake = FALSE;
-    /*
-    if (elm_change) {
-        g_print("Old sink is filesink\n");
-
-        sinkpad = gst_element_get_static_pad(pipe->filesink0, "sink");
-        gst_pad_unlink(srcpad, sinkpad);
-        gst_pad_send_event(sinkpad, gst_event_new_eos());
-        gst_object_unref (sinkpad);
-
-        pipe->filesink1 = gst_element_factory_make("filesink", "filesink1");
-        if (!gst_element_link(pipe->flacenc, pipe->filesink1)) {
-            g_error("Unable to link the encoder and new sink (filesink1)");
-            g_main_loop_quit(loop);
-        }
-        setLocationFilesink(pipe->filesink1);
-
-        gst_bin_add(GST_BIN(pipe->pipeline), pipe->filesink1);
-        gst_element_sync_state_with_parent(pipe->filesink1);
-        sinkpad = gst_element_get_static_pad(pipe->filesink1, "sink");
-        gst_pad_link(srcpad, sinkpad);
-        gst_object_unref(srcpad);
-        gst_object_unref(sinkpad);
-
-        gst_element_set_locked_state(pipe->filesink, TRUE);
-        gst_element_set_state(pipe->filesink, GST_STATE_NULL);
-        gst_bin_remove(GST_BIN(pipe->pipeline), pipe->filesink);
-        pipe->filesink = NULL;
-        //        probe_handler(GST_BIN(pipe->pipeline), pipe->flacenc, pipe->filesink, pipe->flacenc1, pipe->filesink1, srcpad);
-        elm_change = FALSE;
-    }
-    else {
-        g_print("Old sink is filesink1\n");
-
-        sinkpad = gst_element_get_static_pad(pipe->filesink1, "sink");
-        gst_pad_unlink(srcpad, sinkpad);
-        gst_pad_send_event(sinkpad, gst_event_new_eos());
-        gst_object_unref (sinkpad);
-
-        pipe->filesink = gst_element_factory_make("filesink", "filesink");
-        if (!gst_element_link(pipe->flacenc, pipe->filesink)) {
-            g_error("Unable to link the encoder and new sink (filesink)");
-            g_main_loop_quit(loop);
-        }
-        setLocationFilesink(pipe->filesink);
-
-        gst_bin_add(GST_BIN(pipe->pipeline), pipe->filesink);
-        gst_element_sync_state_with_parent(pipe->filesink);
-        sinkpad = gst_element_get_static_pad(pipe->filesink, "sink");
-        gst_pad_link(srcpad, sinkpad);
-        gst_object_unref(srcpad);
-        gst_object_unref(sinkpad);
-
-        gst_element_set_locked_state(pipe->filesink1, TRUE);
-        gst_element_set_state(pipe->filesink1, GST_STATE_NULL);
-
-        gst_bin_remove(GST_BIN(pipe->pipeline), pipe->filesink1);
-        pipe->filesink1 = NULL;
-        //        probe_handler(GST_BIN(pipe->pipeline), pipe->flacenc1, pipe->filesink1, pipe->flacenc, pipe->filesink, srcpad);
-        elm_change = TRUE;
-    }*/
-    /*
-    gst_element_set_state(pipe->filesink, GST_STATE_PLAYING);
-    gst_element_sync_state_with_parent(pipe->filesink);
-    if (gst_pad_link(enc_srcpad,sink_sinkpad))
-        g_print ("Error at linking flacenc and filesink again. Executing...\n");*/
-
-    return GST_PAD_PROBE_OK;
-}
 
 
 
