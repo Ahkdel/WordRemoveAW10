@@ -337,8 +337,8 @@ wakeup(int signum)
 static gboolean
 timeout_cb (PipeStruct *pipe)
 {
-    g_print("\n[DISABLED] Timeout_cb (here we delete '%s' file)\n", pathname);
-    //remove(pathname);
+    g_print("\nTimeout_cb (here we delete '%s' file)\n", pathname);
+    remove(pathname);
     time_reserve = GUARDING_TIME + 1;
     gst_pad_add_probe(gst_element_get_static_pad(pipe->queue, "src"),
                       GstPadProbeType(GST_PAD_PROBE_TYPE_BLOCK),
