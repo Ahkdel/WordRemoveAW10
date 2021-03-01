@@ -12,7 +12,6 @@ int main (int argc, char *argv[])
     signal(SIGRTMIN+2, wakeup);
     SMR_dB = atof(argv[1]);
     g_print("SMR_dB: %f\n", SMR_dB);
-
     GstBus *bus;
     PipeStruct pipe;
 
@@ -21,9 +20,8 @@ int main (int argc, char *argv[])
 
     //Pipe construction
     gst_bin_add_many(GST_BIN (pipe.pipeline), pipe.alsasrc, pipe.decodebin, pipe.audioresample,
-                     pipe.audioconvert0, pipe.level, pipe.queue, pipe.fakesink, pipe.flacenc0, NULL);
+                     pipe.audioconvert0, pipe.level, pipe.queue, pipe.fakesink, NULL);
     if (!setLinks(&pipe)) return -1;
-    pipe.filesink0 = NULL;
 
     //Properties of elements
     setProperties(&pipe);
