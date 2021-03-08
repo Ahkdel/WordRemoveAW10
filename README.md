@@ -12,3 +12,5 @@ In status, you tell the program where you want it to save the audio file.
 It's adviced to change the device property of alsasrc to one that fits you the most.
 
 If another audio format is needed, you can convert it after the recording or you can change the elements "flacenc" to any encoder you need.
+
+You can use the WordRemoverAW10.pro on your QT IDE to compile the program.
